@@ -10,6 +10,11 @@ from typing import Any
 
 from app.seed import SEED_ROWS
 
+# 批量退回整改产生的内部台账，不属于 18 个业务模块，不进入运营概览。
+RECTIFICATION_RECEIPT_TABLE = "rectification_receipt"
+RECTIFICATION_BATCH_TABLE = "rectification_batch"
+INTERNAL_TABLES = {RECTIFICATION_RECEIPT_TABLE, RECTIFICATION_BATCH_TABLE}
+
 
 class Store:
     _lock = threading.RLock()
@@ -18,6 +23,9 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 批量退回整改的内部台账
+        self._tables[RECTIFICATION_RECEIPT_TABLE] = []
+        self._tables[RECTIFICATION_BATCH_TABLE] = []
         # 幂等追踪：{(module, entry_id, action, idempotency_key): timestamp}
         self._idempotent_log: dict[tuple, float] = {}
         # 跨模块锁：{resource_key: thread_id}  用于并发场景 tolerance
@@ -25,7 +33,7 @@ class Store:
 
     # ── 基础访问 ──
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        return sorted(name for name in self._tables if name not in INTERNAL_TABLES)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -155,6 +163,21 @@ class Store:
                 "by_status": status_counts,
             }
         return result
+
+    # ── 整改回执台账辅助 ──
+    def find_receipt(self, acceptance_id: int) -> dict[str, Any] | None:
+        """按验收报告 id 查找整改回执；每份有效报告至多一条。"""
+        for row in self.rows(RECTIFICATION_RECEIPT_TABLE):
+            if int(row.get("验收报告id", 0)) == acceptance_id:
+                return row
+        return None
+
+    def receipts_for_process(self, process: str) -> list[dict[str, Any]]:
+        """按工序（施工班次）查询尚未关闭的整改回执，供修缮日志读取待办。"""
+        return [
+            dict(row) for row in self.rows(RECTIFICATION_RECEIPT_TABLE)
+            if row.get("验收工序", "") == process and not row.get("已关闭", False)
+        ]
 
 
 store = Store()

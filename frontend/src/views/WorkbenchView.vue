@@ -75,6 +75,18 @@
       </tbody>
     </table>
 
+    <AcceptanceRectPanel
+      v-if="meta.key === 'acceptance_record'"
+      ref="acceptancePanel"
+      :rows="rows"
+      @changed="reload"
+    />
+    <RectificationTodoPanel
+      v-else-if="meta.key === 'restoration_log'"
+      ref="todoPanel"
+      @changed="reload"
+    />
+
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
         <h3>登记{{ meta.entity }}</h3>
@@ -108,6 +120,8 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import AcceptanceRectPanel from '@/views/AcceptanceRectPanel.vue'
+import RectificationTodoPanel from '@/views/RectificationTodoPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
@@ -119,6 +133,8 @@ const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const acceptancePanel = ref<InstanceType<typeof AcceptanceRectPanel> | null>(null)
+const todoPanel = ref<InstanceType<typeof RectificationTodoPanel> | null>(null)
 
 const stats = computed(() => [
   { label: meta.metrics[0], value: total.value },
@@ -168,6 +184,8 @@ async function reload() {
   try {
     const payload = await listEntries(meta.key, filters.value)
     rows.value = payload.items; total.value = payload.total
+    await acceptancePanel.value?.reload()
+    await todoPanel.value?.reload()
   } catch (e) { errorMessage.value = e instanceof Error ? e.message : '业务列表读取失败' }
 }
 

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import ActionPayload, ActionResult, BatchReturnPayload, EntryPayload, PageResult
 from app.services import SERVICE_INSTANCES, service_for
 from app.store import store
 
@@ -22,84 +22,58 @@ def require_service(module: str):
     return service
 
 
-@router.get("/{module}", response_model=PageResult[dict])
-def list_entries(
-    module: str,
-    request: Request,
-    keyword: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=200),
-) -> PageResult[dict]:
-    service = require_service(module)
-    filters = {
-        key: value.strip()
-        for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
-    }
-    items, total = service.list_entries(
-        filters=filters, keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+# ── 验收记录：批量退回整改 / 备案冲突 / 整改资格解释 ──
+# 显式路径必须注册在通用 /{module} 动态路由之前，避免被动态路径抢先匹配。
 
-
-@router.get("/{module}/export")
-def export_entries(
-    module: str,
-    request: Request,
-    keyword: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-) -> StreamingResponse:
-    service = require_service(module)
-    filters = {
-        key: value.strip()
-        for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
-    }
-    items, _ = service.list_entries(
-        filters=filters, keyword=keyword, status=status, page=1, size=1_000_000)
-    output = io.StringIO()
-    output.write("\ufeff")
-    writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(["id", *service.LIST_FIELDS, "status"])
-    for item in items:
-        values = [item.get("id"), *(item.get(field, "") for field in service.LIST_FIELDS),
-                  item.get("status", "")]
-        writer.writerow([
-            "'" + str(value) if str(value or "").startswith(("=", "+", "-", "@")) else value
-            for value in values
-        ])
-    return StreamingResponse(
-        iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{module}.csv"'},
+@router.post("/acceptance_record/batch-return")
+def batch_return_acceptance(payload: BatchReturnPayload) -> dict[str, Any]:
+    """监理批量勾选同一现场的多份验收报告及连带缺陷并退回整改。"""
+    if not payload.acceptance_ids:
+        raise HTTPException(status_code=400, detail="请至少勾选一份验收报告")
+    service = require_service("acceptance_record")
+    return service.batch_return(
+        payload.acceptance_ids,
+        defects_by_report=payload.defects_by_report,
+        site=payload.site or "",
+        deadline=payload.deadline or "",
+        remark=payload.remark or "",
     )
 
 
-@router.get("/{module}/{entry_id}", response_model=dict)
-def get_entry(module: str, entry_id: int) -> dict[str, Any]:
-    service = require_service(module)
-    entry = service.get_entry(entry_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"{service.ENTITY} {entry_id} 不存在或已归档")
-    return entry
+@router.get("/acceptance_record/rectification-overview")
+def acceptance_rectification_overview() -> dict[str, Any]:
+    """返回整改回执、批次记录及每份报告在整组操作后的补写资格解释。"""
+    service = require_service("acceptance_record")
+    return service.rectification_overview()
 
 
-@router.post("/{module}", response_model=ActionResult)
-def create_entry(module: str, payload: EntryPayload) -> ActionResult:
-    service = require_service(module)
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
-
-
-@router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
-    service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
+@router.post("/acceptance_record/{entry_id}/filing/begin", response_model=ActionResult)
+def begin_acceptance_filing(entry_id: int) -> ActionResult:
+    """模拟提交备案：报告进入备案中，与批量退回形成资格冲突。"""
+    service = require_service("acceptance_record")
+    entry, message = service.begin_filing(entry_id)
     return ActionResult(ok=entry is not None, message=message, entry=entry)
 
 
+@router.post("/acceptance_record/{entry_id}/filing/complete", response_model=ActionResult)
+def complete_acceptance_filing(entry_id: int) -> ActionResult:
+    """模拟备案完成：报告转为已备案并锁定，批量操作不可再写入。"""
+    service = require_service("acceptance_record")
+    entry, message = service.complete_filing(entry_id)
+    return ActionResult(ok=entry is not None, message=message, entry=entry)
+
+
+# ── 修缮日志：整改待办 ──
+
+@router.get("/restoration_log/rectification-todos")
+def restoration_rectification_todos() -> dict[str, Any]:
+    """修缮日志页读取批量退回同步过来的整改待办（实际整改回执）。"""
+    service = require_service("restoration_log")
+    return service.rectification_todos()
+
+
 # ── 跨模块联动查询 API ──
+# 同样是显式字面量路径，必须在 /{module} 动态路由之前注册，否则会被动态路径抢先匹配。
 
 @router.get("/cross-module/snapshot")
 def cross_module_snapshot(
@@ -219,6 +193,82 @@ def dependency_graph() -> dict[str, Any]:
         {"from": "construction_schedule", "to": "completion_summary", "label": "全部排期完成==竣工"},
         {"from": "material_verify", "to": "work_sequence", "label": "材料签认解锁工序"},
         {"from": "restoration_log", "to": "work_sequence", "label": "全部日志归档==完成"},
-
     ]
     return graph
+
+
+@router.get("/{module}", response_model=PageResult[dict])
+def list_entries(
+    module: str,
+    request: Request,
+    keyword: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=200),
+) -> PageResult[dict]:
+    service = require_service(module)
+    filters = {
+        key: value.strip()
+        for key, value in request.query_params.items()
+        if key in service.LIST_FIELDS and value.strip()
+    }
+    items, total = service.list_entries(
+        filters=filters, keyword=keyword, status=status, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/{module}/export")
+def export_entries(
+    module: str,
+    request: Request,
+    keyword: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> StreamingResponse:
+    service = require_service(module)
+    filters = {
+        key: value.strip()
+        for key, value in request.query_params.items()
+        if key in service.LIST_FIELDS and value.strip()
+    }
+    items, _ = service.list_entries(
+        filters=filters, keyword=keyword, status=status, page=1, size=1_000_000)
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(["id", *service.LIST_FIELDS, "status"])
+    for item in items:
+        values = [item.get("id"), *(item.get(field, "") for field in service.LIST_FIELDS),
+                  item.get("status", "")]
+        writer.writerow([
+            "'" + str(value) if str(value or "").startswith(("=", "+", "-", "@")) else value
+            for value in values
+        ])
+    return StreamingResponse(
+        iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{module}.csv"'},
+    )
+
+
+@router.get("/{module}/{entry_id}", response_model=dict)
+def get_entry(module: str, entry_id: int) -> dict[str, Any]:
+    service = require_service(module)
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"{service.ENTITY} {entry_id} 不存在或已归档")
+    return entry
+
+
+@router.post("/{module}", response_model=ActionResult)
+def create_entry(module: str, payload: EntryPayload) -> ActionResult:
+    service = require_service(module)
+    entry, missing = service.create_entry(payload.values)
+    if missing:
+        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
+
+
+@router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
+def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+    service = require_service(module)
+    entry, message = service.run_action(entry_id, payload.action.strip())
+    return ActionResult(ok=entry is not None, message=message, entry=entry)

@@ -77,5 +77,23 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 验收批量退回整改
+
+监理可在「验收记录」页勾选同一现场多份**已签署且未备案**的验收报告，填写连带缺陷后整组退回：
+
+- 后端入口：`POST /api/acceptance_record/batch-return`，逻辑在
+  `app/services/acceptance_record.py` 的 `batch_return`；批次内重复勾选、批次重复提交都做去重，
+  每份有效报告只保留一条整改回执（内部表 `rectification_receipt` / `rectification_batch`，
+  不进入 18 个业务模块和运营概览）。
+- 已备案报告（`已归档` 或 `备案状态=已备案`）不允许批量操作写入；`备案中` 报告触发资格冲突。
+  备案过程可用 `POST /api/acceptance_record/{id}/filing/begin|complete` 模拟。
+- 每条成功退回保存原报告快照、连带缺陷与整改期限，回执同步为「修缮日志」页整改待办
+  （`GET /api/restoration_log/rectification-todos`）。
+- 日志补写必须携带真实、未关闭且施工班次匹配的 `整改回执编号`，否则提交被拒；
+  审核通过后关闭回执，关闭后不可重复补写。
+- 整组操作后的补写资格解释、失败原因与批次台账见
+  `GET /api/acceptance_record/rectification-overview`。
+- 前端面板：`AcceptanceRectPanel.vue`（验收页）与 `RectificationTodoPanel.vue`（日志页）。
+
 领域：应用开发
 子方向：web前端/全栈开发

@@ -29,3 +29,13 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class BatchReturnPayload(BaseModel):
+    """监理批量退回整改：同一现场多份验收报告及其连带缺陷。"""
+    acceptance_ids: list[int] = Field(default_factory=list)
+    # 每份报告勾选的连带缺陷，key 为验收报告 id（字符串形式）
+    defects_by_report: dict[str, str] = Field(default_factory=dict)
+    site: str = ""
+    deadline: str | None = None
+    remark: str | None = None

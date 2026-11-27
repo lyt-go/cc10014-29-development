@@ -5,7 +5,16 @@ export type EntryRow = {
   status: string
   pending: boolean
   abnormal: boolean
-  [field: string]: string | number | boolean
+  备案状态?: string
+  已归档?: boolean
+  整改回执编号?: string
+  [field: string]: string | number | boolean | undefined
+}
+
+export type ActionResult = {
+  ok: boolean
+  message: string
+  entry?: EntryRow | null
 }
 
 export type ModuleMeta = {
@@ -25,11 +34,6 @@ export type PageResult = {
   total: number
   page: number
   size: number
-}
-
-export type ActionResult = {
-  ok: boolean
-  message: string
 }
 
 export type OverviewResult = {
